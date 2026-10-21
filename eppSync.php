@@ -1,12 +1,20 @@
 <?php
-/**
- * Namingo EPP Registrar module for FOSSBilling (https://fossbilling.org/)
+
+/*
+ * Namingo EPP Registrar module for FOSSBilling
  *
- * Written in 2024-2026 by Taras Kondratyuk (https://namingo.org)
+ * Copyright (c) 2023-2026 Taras Kondratyuk
+ * Copyright (c) 2025-2026 Namingo contributors
+ * Copyright (c) 2026 Terbora Ltd.
+ *
  * Based on Generic EPP with DNSsec Registrar Module for WHMCS written in 2019 by Lilian Rudenco (info@xpanel.com)
  * Work of Lilian Rudenco is under http://opensource.org/licenses/afl-3.0.php Academic Free License (AFL 3.0)
+ * https://github.com/xpanel/Generic-EPP-with-DNSsec-Registrar-Module-for-WHMCS
  *
- * @license MIT
+ * Licensed under the MIT License.
+ * See the LICENSE file distributed with this software for the full license text.
+ *
+ * SPDX-License-Identifier: MIT
  */
 
 require_once __DIR__ . '/load.php';
@@ -124,6 +132,12 @@ try {
             continue;
         }
 
+        if (($config['registry_profile'] ?? 'generic') === 'RO'
+            && (empty($config['clid']) || (string)($domainInfo['clID'] ?? '') !== (string)$config['clid'])) {
+            echo 'RoTLD sponsorship not confirmed; skipping ' . $domain . PHP_EOL;
+            continue;
+        }
+
         $ns = $domainInfo['ns'] ?? null;
         $ns1 = $ns2 = $ns3 = $ns4 = null;
 
@@ -160,10 +174,11 @@ try {
            $locked = 0;
         }
 
-        $authInfo = $domainInfo['authInfo'] ?? null;
+        $preserveTransferCode = ($config['registry_profile'] ?? 'generic') === 'RO';
+        $authInfo = $preserveTransferCode ? null : ($domainInfo['authInfo'] ?? null);
 
         // Prepare the UPDATE statement
-        $stmt = $pdo->prepare('UPDATE service_domain SET ns1 = :ns1, ns2 = :ns2, ns3 = :ns3, ns4 = :ns4, expires_at = :expires_at, locked = :locked, synced_at = :synced_at, transfer_code = :transfer_code WHERE sld = :sld AND tld = :tld');
+        $stmt = $pdo->prepare('UPDATE service_domain SET ns1 = :ns1, ns2 = :ns2, ns3 = :ns3, ns4 = :ns4, expires_at = :expires_at, locked = :locked, synced_at = :synced_at, transfer_code = CASE WHEN :preserve_transfer_code = 1 THEN transfer_code ELSE :transfer_code END WHERE sld = :sld AND tld = :tld');
         $stmt->bindValue(':ns1', $ns1);
         $stmt->bindValue(':ns2', $ns2);
         $stmt->bindValue(':ns3', $ns3);
@@ -172,6 +187,7 @@ try {
         $stmt->bindValue(':locked', $locked);
         $stmt->bindValue(':synced_at', date('Y-m-d H:i:s'));
         $stmt->bindValue(':transfer_code', $authInfo);
+        $stmt->bindValue(':preserve_transfer_code', (int)$preserveTransferCode, PDO::PARAM_INT);
         $stmt->bindValue(':sld', $domainRow['sld']);
         $stmt->bindValue(':tld', $domainRow['tld']);
         $stmt->execute();

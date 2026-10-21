@@ -1,12 +1,20 @@
 <?php
-/**
- * Namingo EPP Registrar module for FOSSBilling (https://fossbilling.org/)
+
+/*
+ * Namingo EPP Registrar module for FOSSBilling
  *
- * Written in 2024-2026 by Taras Kondratyuk (https://namingo.org)
+ * Copyright (c) 2023-2026 Taras Kondratyuk
+ * Copyright (c) 2025-2026 Namingo contributors
+ * Copyright (c) 2026 Terbora Ltd.
+ *
  * Based on Generic EPP with DNSsec Registrar Module for WHMCS written in 2019 by Lilian Rudenco (info@xpanel.com)
  * Work of Lilian Rudenco is under http://opensource.org/licenses/afl-3.0.php Academic Free License (AFL 3.0)
+ * https://github.com/xpanel/Generic-EPP-with-DNSsec-Registrar-Module-for-WHMCS
  *
- * @license MIT
+ * Licensed under the MIT License.
+ * See the LICENSE file distributed with this software for the full license text.
+ *
+ * SPDX-License-Identifier: MIT
  */
 
 $autoload = __DIR__ . '/../../../namingo/vendor/autoload.php';
@@ -62,6 +70,11 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
             // EURid
             'eurid_billing_contact' => $options['eurid_billing_contact'] ?? null,
 
+            // RoTLD: client-profile field mappings, never shared holder values.
+            'ro_person_type_field' => $options['ro_person_type_field'] ?? 'custom_1',
+            'ro_fiscal_code_field' => $options['ro_fiscal_code_field'] ?? 'custom_2',
+            'ro_registration_number_field' => $options['ro_registration_number_field'] ?? 'company_number',
+
             // NASK
             'pl_contact_prefix' => $options['pl_contact_prefix'] ?? null,
 
@@ -77,6 +90,18 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
 
     public static function getConfig()
     {
+        $roTypeFields = ['auto' => 'Automatic: person or company'];
+        $roDataFields = [
+            'auto' => 'Automatic from standard client/contact fields',
+            'company_vat' => 'Company VAT / fiscal code',
+            'company_number' => 'Company registration number',
+            'document_nr' => 'Contact identity document number',
+        ];
+        foreach (range(1, 20) as $number) {
+            $roTypeFields['custom_' . $number] = 'Client custom field ' . $number;
+            $roDataFields['custom_' . $number] = 'Client custom field ' . $number;
+        }
+
         return [
             'label' => 'Connect FOSSBilling to any domain registry using the standard EPP protocol.',
             'form'  => [
@@ -178,6 +203,7 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
                         'MX'      => 'MX',
                         'PL'      => 'PL',
                         'PT'      => 'PT',
+                        'RO'      => 'RO',
                         'SE'      => 'SE',
                         'SI'      => 'SI',
                         'SWITCH'  => 'SWITCH',
@@ -244,6 +270,27 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
                     'description' => 'Optional contact ID prefix for NASK (.pl). Used when EPP profile is PL.',
                 ]],
 
+                'ro_person_type_field' => ['select', [
+                    'label' => 'RoTLD Person Type Field',
+                    'default' => 'custom_1',
+                    'multiOptions' => $roTypeFields,
+                    'description' => 'RO only. Client-profile field containing p, ap, nc, c, gi, pi or o. Empty values use p/c based on Company Name.',
+                ]],
+
+                'ro_fiscal_code_field' => ['select', [
+                    'label' => 'RoTLD CNP / Fiscal Code Field',
+                    'default' => 'custom_2',
+                    'multiOptions' => $roDataFields,
+                    'description' => 'RO only. Empty custom values fall back to Company VAT for companies or the contact document number for individuals.',
+                ]],
+
+                'ro_registration_number_field' => ['select', [
+                    'label' => 'RoTLD Registration Number Field',
+                    'default' => 'company_number',
+                    'multiOptions' => $roDataFields,
+                    'description' => 'RO only. Company registration number; required for Romanian commercial companies.',
+                ]],
+
                 'debug_log' => ['radio', [
                     'multiOptions' => ['1' => 'Yes', '0' => 'No'],
                     'label'        => 'EPP Debug Logging',
@@ -267,6 +314,14 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
     public function isDomaincanBeTransferred(Registrar_Domain $domain)
     {
         $this->getLog()->debug('Checking if domain can be transferred: ' . $domain->getName());
+
+        if (($this->config['registry_profile'] ?? 'generic') === 'RO') {
+            // Foreign-domain info may be restricted; the transfer key is checked on request.
+            if ($this->isDomainAvailable($domain)) {
+                throw new Registrar_Exception('An unregistered domain cannot be transferred.');
+            }
+            return true;
+        }
 
         try {
             $epp = $this->epp_client();
@@ -584,7 +639,6 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
     public function transferDomain(Registrar_Domain $domain)
     {
         $this->getLog()->debug('Transfering domain: ' . $domain->getName());
-        $this->getLog()->debug('Epp code: ' . $domain->getEpp());
         try {
             $epp = $this->epp_client();
             $domain_name = $domain->getName();
@@ -593,7 +647,16 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
                 : $domain_name;
 
             $profile = $this->config['registry_profile'] ?? 'generic';
-            if ($profile === 'FR') {
+            if ($profile === 'RO') {
+                if (trim((string)$domain->getEpp()) === '') {
+                    throw new Registrar_Exception('The holder must supply a RoTLD registrar-transfer key.');
+                }
+                $domainTransfer = $epp->domainTransfer([
+                    'domainname' => $domain_name,
+                    'authInfoPw' => $domain->getEpp(),
+                    'op' => 'request',
+                ]);
+            } else if ($profile === 'FR') {
                 $domainInfo = $epp->domainInfo([
                     'domainname' => $domain_name,
                 ]);
@@ -646,6 +709,23 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
                     'EPP domainTransfer ' . $domain->getName() . ': ' .
                     json_encode($domainTransfer, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
                 );
+            }
+
+            if ($profile === 'RO') {
+                if ((int)($domainTransfer['code'] ?? 0) !== 1000) {
+                    throw new Registrar_Exception('RoTLD did not confirm an immediate transfer.');
+                }
+                $info = $epp->domainInfo(['domainname' => $domain_name]);
+                if (!empty($info['error'])) {
+                    throw new Registrar_Exception((string)$info['error']);
+                }
+                if (empty($this->config['clid']) || (string)($info['clID'] ?? '') !== (string)$this->config['clid']) {
+                    throw new Registrar_Exception('RoTLD transfer sponsorship could not be confirmed.');
+                }
+                $expires = !empty($info['exDate']) ? strtotime((string)$info['exDate']) : false;
+                if ($expires !== false) {
+                    $domain->setExpirationTime($expires);
+                }
             }
 
             return true;
@@ -706,7 +786,9 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
 
             $domain->setRegistrationTime($crDate);
             $domain->setExpirationTime($exDate);
-            $domain->setEpp($eppcode);
+            if (($this->config['registry_profile'] ?? 'generic') !== 'RO') {
+                $domain->setEpp($eppcode);
+            }
 
             $domain->setNs1(isset($ns[0]) ? $ns[0] : '');
             $domain->setNs2(isset($ns[1]) ? $ns[1] : '');
@@ -789,7 +871,11 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
     {
         $this->getLog()->debug('Registering domain: ' . $domain->getName(). ' for '.$domain->getRegistrationPeriod(). ' years');
         $client = $domain->getContactRegistrar();
-        
+
+        $roFields = ($this->config['registry_profile'] ?? 'generic') === 'RO'
+            ? $this->getRoContactFields($client)
+            : [];
+
         try {
             $epp = $this->epp_client();
             $domain_name = $domain->getName();
@@ -835,6 +921,7 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
                     'SWITCH'=> ['registrant', 'tech'],
                     'PL'=> ['registrant'],
                     'GE'=> ['registrant'],
+                    'RO'=> ['registrant'],
                     'generic'=> ['registrant', 'admin', 'tech', 'billing'],
                     'VRSN'   => ['registrant', 'admin', 'tech', 'billing'],
                 ];
@@ -885,6 +972,10 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
                                 : '',
                         'email'           => $client->getEmail() ?? '',
                         'authInfoPw'      => $authInfoPw,
+                        // RoTLD holder fields
+                        'person_type' => $roFields['person_type'] ?? null,
+                        'cnp_fiscal_code' => $roFields['cnp_fiscal_code'] ?? null,
+                        'registration_number' => $roFields['registration_number'] ?? null,
                         // EU-only extras
                         'euType'    => ($profile === 'EU') ? $contactType : null,
                         // SE-only extras
@@ -933,6 +1024,9 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
                         );
                     }
 
+                    if ($profile === 'RO' && empty($contactCreate['id'])) {
+                        throw new Registrar_Exception('RoTLD did not return its assigned contact ID.');
+                    }
                     $createdId = $contactCreate['id'] ?? $id;
                     $contacts[$i + 1] = $createdId;
                 }
@@ -1308,8 +1402,7 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
                 ]);
 
                 if (isset($contactUpdate['error'])) {
-                    echo 'ContactUpdate Error: ' . $contactUpdate['error'] . PHP_EOL;
-                    return;
+                    throw new Registrar_Exception((string)$contactUpdate['error']);
                 }
 
                 if (!empty($this->config['debug_log'])) {
@@ -1666,6 +1759,10 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
 
     public function getEpp(Registrar_Domain $domain)
     {
+        if (($this->config['registry_profile'] ?? 'generic') === 'RO') {
+            throw new Registrar_Exception('The domain holder must generate the registrar-transfer key at https://www.rotld.ro/domadmin. The domain management password is not a transfer key.');
+        }
+
         $this->getLog()->debug('Retrieving domain transfer code: ' . $domain->getName());
         try {
             $epp = $this->epp_client();
@@ -2308,6 +2405,74 @@ class Registrar_Adapter_EPP extends Registrar_AdapterAbstract
                 $this->epp_client_logout($epp);
             }
         }
+    }
+
+    private function getRoContactFields(Registrar_Domain_Contact $contact): array
+    {
+        global $di;
+
+        // The associated order identifies the client; never guess by contact email.
+        $order = $this->_order;
+        $clientId = is_object($order) && method_exists($order, 'getClientId')
+            ? $order->getClientId()
+            : ($order->client_id ?? null);
+        if (empty($clientId) || !isset($di['pdo'])) {
+            throw new Registrar_Exception('RoTLD registration requires the associated FOSSBilling client order.');
+        }
+        $statement = $di['pdo']->prepare('SELECT * FROM client WHERE id = :id LIMIT 1');
+        $statement->execute(['id' => (int)$clientId]);
+        $client = $statement->fetch(\PDO::FETCH_ASSOC);
+        if (!$client) {
+            throw new Registrar_Exception('The RoTLD holder client profile could not be found.');
+        }
+
+        $company = trim((string)$contact->getCompany());
+        $values = [
+            'person_type' => $company !== '' ? 'c' : 'p',
+            'cnp_fiscal_code' => $company !== ''
+                ? trim((string)($client['company_vat'] ?? ''))
+                : trim((string)$contact->getDocumentNr()),
+            'registration_number' => trim((string)$contact->getCompanyNumber()),
+        ];
+        $mappings = [
+            'person_type' => $this->config['ro_person_type_field'],
+            'cnp_fiscal_code' => $this->config['ro_fiscal_code_field'],
+            'registration_number' => $this->config['ro_registration_number_field'],
+        ];
+        foreach ($mappings as $field => $source) {
+            $source = trim((string)$source);
+            if ($source === '' || $source === 'auto') {
+                continue;
+            }
+            if ($source === 'document_nr') {
+                $value = trim((string)$contact->getDocumentNr());
+            } else if (in_array($source, ['company_vat', 'company_number'], true)
+                || preg_match('/^custom_(?:[1-9]|1[0-9]|20)$/D', $source)) {
+                $value = trim((string)($client[$source] ?? ''));
+            } else {
+                throw new Registrar_Exception('Invalid RoTLD client-field mapping: ' . $source);
+            }
+            if ($value !== '') {
+                $values[$field] = $value;
+            }
+        }
+        $values['person_type'] = strtolower($values['person_type']);
+        if (!in_array($values['person_type'], ['p', 'ap', 'nc', 'c', 'gi', 'pi', 'o'], true)) {
+            throw new Registrar_Exception('RoTLD person type must be p, ap, nc, c, gi, pi or o.');
+        }
+        if (!in_array($values['person_type'], ['p', 'ap'], true) && $company === '') {
+            throw new Registrar_Exception('A legal entity name is required in the holder Company Name field.');
+        }
+        if (strtoupper((string)$contact->getCountry()) === 'RO') {
+            if ($values['cnp_fiscal_code'] === '') {
+                throw new Registrar_Exception('CNP / fiscal code is required for Romanian holders.');
+            }
+            if ($values['person_type'] === 'c' && $values['registration_number'] === '') {
+                throw new Registrar_Exception('Company registration number is required for Romanian companies.');
+            }
+        }
+
+        return $values;
     }
 
     private function getPtValidation(string $email): array

@@ -2,13 +2,13 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-VERSION='1.2.4'
+VERSION='1.2.6'
 ARCHIVE="fossbilling-epp-v${VERSION}.tar.gz"
 DOWNLOAD_URL="https://github.com/getnamingo/fossbilling-epp-registrar/releases/download/v${VERSION}/${ARCHIVE}"
 ARCHIVE_SHA256='ebd16781bade6244dee86f4a1e509e3f6397137bab1e7b58d192aa15d9816395'
 
 CC_REGISTRIES=(
-  registrebf switch niccl cocca cocca2 eurid afnic nicge carnet nicim switchli
+  arnes registrebf switch niccl cocca cocca2 eurid afnic nicge carnet nicim switchli
   niclv nicmx sidn iisnu nask rotld iis hostmaster ye zadna
 )
 G_REGISTRIES=(
